@@ -1,0 +1,78 @@
+#pragma once
+
+#include "tensor.h"
+#include "block_manager.h"
+
+/**
+ * Paged attention (M9 sub-block B, read half).
+ * Reads K/V from BlockManager pool via block_table (logical block -> physical block_id), not from a contiguous buffer.
+ *   decode:  Q=[nh,1,hd],  seq_k=cursor
+ *   prefill: Q=[nh,seq,hd], seq_k=seq (self-attn)
+ *   GQA: Q=nh heads, K/V=nkv heads, rep=nh/nkv
+ * K/V element offset for logical token t:
+ *   block=block_table[t/BS], slot=t%BS
+ *   K=pool + layer*layer_stride_elems + block*block_elems + head*BS*hd + slot*hd + d
+ *   V=... + nkv*BS*hd + head*BS*hd + slot*hd + d
+ * Same [nkv,BS,hd] K-then-V layout as paged_write (offsets in elements).
+ * block_table: device const int* len ceil(seq_k/BS).
+ * batch=1; batch axis in grid dim -> future N only touches launcher.
+ * Same online-softmax order as FA2 -> bit-exact vs contiguous path.
+ */
+Tensor paged_attention(const BlockManager &bm, int layer,
+                       const Tensor &Q,
+                       const int *d_block_table, std::int64_t seq_k,
+                       int num_heads, int num_kv_heads,
+                       bool is_decode);
+
+/**
+ * CUDA launch (CUDA-free decl so .cpp links without CUDA header).
+ */
+void paged_attention_launch(void *out, const void *Q,
+                            const void *pool, const int *d_block_table,
+                            std::int64_t layer_stride_elems, int block_elems, int layer,
+                            int batch, int num_heads, int num_kv_heads,
+                            int seq_q, int seq_k, int head_dim, int block_size,
+                            bool is_decode, DType dtype);
+
+/**
+ * Paged attention, multi-request (Phase 3): prefill varlen + decode multi-seq.
+ *   prefill: Q=[sum_q, num_heads, hd] (varlen, concatenated);
+ *            3D grid(ceil(max_seqlen_q/Br), num_seqs, num_heads);
+ *            blockIdx.x=段内q块, y=seq, z=head; seq定位=直接下标 cu_seqlens_q[seq] (无二分);
+ *            short-seg early-exit (qb*Br >= seq_q); causal INTRA-segment (seg-local).
+ *   decode:  Q=[num_seqs, num_heads, hd] (1 Q token/seq);
+ *            grid(ceil(num_seqs/NUM_WARPS), num_heads); NUM_WARPS seqs packed per block;
+ *            per-seq seq_k from cu_seqlens_k; cu_seqlens_q UNUSED in decode.
+ *   K/V read from pool via 2D block_table [num_seqs, max_blocks_per_seq] (logical block -> physical).
+ *   N independent PagedKVCache (per-seq block_table + cursor); caller (forward) gathers them into the 2D block_table + cu_seqlens arrays (vLLM form: per-seq List[int] -> [num_seqs, max_blocks]).
+ *   max_seqlen_q: max seg q-length (prefill grid.x basis; ignored in decode).
+ *   GQA: Q=num_heads, K/V=num_kv_heads, rep=num_heads/num_kv_heads.
+ *   No padding mask: decode per-seq independent; prefill varlen segments isolate requests (intra-seg causal only).
+ *   result rows = Q.shape()[0] (decode: num_seqs; prefill: sum_q). Same online-softmax order as FA2.
+ */
+Tensor paged_attention(const BlockManager &bm, int layer,
+                       const Tensor &Q,
+                       const int *d_block_table_2d, // [num_seqs, max_blocks_per_seq], device
+                       const int *cu_seqlens_q,     // [num_seqs+1], device; decode: [0,1,2,..]
+                       const int *cu_seqlens_k,     // [num_seqs+1], device; decode: cumsum(cursor)
+                       int num_seqs, int max_blocks_per_seq, int max_seqlen_q,
+                       int num_heads, int num_kv_heads,
+                       bool is_decode);
+
+/**
+ * CUDA launch (CUDA-free decl so .cpp links without CUDA header).
+ */
+void paged_attention_decode_launch(void *out, const void *Q, const void *pool,
+                                   const int *d_block_table_2d, const int *cu_seqlens_k,
+                                   int num_seqs, int max_blocks_per_seq,
+                                   std::int64_t layer_stride_elems, int block_elems, int layer,
+                                   int num_heads, int num_kv_heads, int head_dim, int block_size,
+                                   DType dtype);
+
+void paged_attention_prefill_launch(void *out, const void *Q, const void *pool,
+                                    const int *d_block_table_2d,
+                                    const int *cu_seqlens_q, const int *cu_seqlens_k,
+                                    int num_seqs, int max_blocks_per_seq, int max_seqlen_q,
+                                    std::int64_t layer_stride_elems, int block_elems, int layer,
+                                    int num_heads, int num_kv_heads, int head_dim, int block_size,
+                                    DType dtype);

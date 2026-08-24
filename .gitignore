@@ -1,0 +1,61 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ===== 虚拟环境(本地,不进仓库) =====
+.venv/
+venv/
+env/
+
+# ===== C++ / CMake 构建产物 =====
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+
+# ===== 编译生成的 Python 扩展(xstar_cpp_py 保留 __init__.py) =====
+# .so 已被上面 *.so 覆盖,这里显式标注提醒
+xstar_cpp_py/*.so
+
+# ===== CMake 生成的 compile_commands.json(clangd/IDE 用,本地) =====
+compile_commands.json
+
+# ===== IDE / 编辑器(个人配置,不进仓库) =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===== Agent 本地配置(目录,不影响根目录 CLAUDE.md) =====
+.claude/
+
+# ===== 模型权重 / 大数据(避免误传大文件) =====
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+models/
+data/
+
+# ===== 日志 / 临时输出 =====
+*.log
+logs/
+tmp/
+
+# ===== OS 杂项 =====
+.DS_Store
+Thumbs.db
