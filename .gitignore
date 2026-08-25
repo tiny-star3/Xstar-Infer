@@ -48,7 +48,6 @@ compile_commands.json
 *.pt
 *.pth
 *.ckpt
-models/
 data/
 
 # ===== 日志 / 临时输出 =====
@@ -59,3 +58,7 @@ tmp/
 # ===== OS 杂项 =====
 .DS_Store
 Thumbs.db
+
+
+# ===== 项目文档, 本地看 =====
+docs/
