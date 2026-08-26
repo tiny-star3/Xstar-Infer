@@ -60,5 +60,5 @@ tmp/
 Thumbs.db
 
 
-# ===== 项目文档, 本地看 =====
-docs/
+# ===== mock-interview 是本地应试练习, 不上传 =====
+docs/mock-interview-*.md
