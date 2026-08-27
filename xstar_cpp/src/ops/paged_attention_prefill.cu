@@ -37,8 +37,8 @@ __global__ void paged_attention_prefill_kernel(T *out, const T *Q, const T *pool
     int head = blockIdx.z;
     // 当前 request 的 query seq 长度
     int seq_q = cu_seqlens_q[seq + 1] - cu_seqlens_q[seq];
-    // prefill 中 seq_k = seq_q
-    int seq_k = seq_q;
+    // extend attention, seq_k 和 seq_q 不同
+    int seq_k = cu_seqlens_k[seq + 1] - cu_seqlens_k[seq];
     int kv_head = head / (num_heads / num_kv_heads);
     int tid = threadIdx.x;
     int lane = tid % 32;
@@ -84,10 +84,10 @@ __global__ void paged_attention_prefill_kernel(T *out, const T *Q, const T *pool
     for (int i = 0; i < seq_k; i += Bc)
     {
         // 无 mask(纯 causal)且整块未来: 全掩贡献 0, 跳过; additive-mask 未来块有真值不跳
-        if (i >= qb * Br + Br)
+        if (i >= (seq_k - seq_q) + qb * Br + Br)
             continue;
         // causal 三态: 整块未来->skip(见上), 整块过去->full_past 快路径(免逐元素), 跨对角线->逐元素; full_past 仅无 mask 路径用
-        bool full_past = (i + Bc - 1 <= qb * Br);
+        bool full_past = (i + Bc - 1 <= (seq_k - seq_q) + qb * Br);
         float m_old = m;
         float l_old = l;
         l = 0;
@@ -147,7 +147,7 @@ __global__ void paged_attention_prefill_kernel(T *out, const T *Q, const T *pool
             // 跨对角线
             for (int t = 0; t < COL_PER_THREAD; t++)
             {
-                if (local_query < seq_q && local_key + t < seq_k && local_query >= local_key + t)
+                if (local_query < seq_q && local_key + t < seq_k && local_query + (seq_k - seq_q) >= local_key + t)
                 {
                     acc_s[t] = acc_s[t] * scalar;
                 }

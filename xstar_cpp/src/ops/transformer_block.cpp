@@ -284,9 +284,10 @@ Tensor transformer_block(const Tensor &x,
         }
         else
         {
+            std::int64_t base = kv_caches[s]->cursor() - len;
             for (std::int64_t i = 0; i < len; i++)
             {
-                slot_mapping[start + i] = bt[i / block_size] * block_size + i % block_size;
+                slot_mapping[start + i] = bt[(base + i) / block_size] * block_size + (base + i) % block_size;
             }
         }
     }

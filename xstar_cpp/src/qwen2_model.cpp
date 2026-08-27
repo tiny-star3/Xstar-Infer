@@ -107,9 +107,12 @@ Tensor qwen2_forward(const Qwen2ModelWeights &w,
         }
         else
         {
+            // 支持直接 prefill 和前缀匹配后的 prefill
+            // matched_len (radix) or 0 (fresh); = absolute position of first residual token
+            std::int64_t cursor = kv_caches[s]->cursor();
             for (std::int64_t i = 0; i < len; i++)
             {
-                positions[start + i] = i;
+                positions[start + i] = cursor + i;
             }
         }
     }

@@ -40,6 +40,8 @@
 #include "kv_cache.h"
 #include "paged_kv_cache.h"
 
+#include "radix_cache.h"
+
 namespace py = pybind11;
 
 // 从 numpy 数组构造 Tensor(拷贝数据进 owned buffer)
@@ -331,7 +333,7 @@ Tensor qwen2_forward_paged_py(Qwen2ModelWeights &w, Qwen2Config &cfg, Tensor &ro
     Tensor *mask_ptr = nullptr;
     std::optional<std::vector<std::int64_t>> buf;
 
-    // 路 X:从 kv_cache.cursor() 造 positions(decode: [cursor]; prefill: arange(0, seq_len))
+    // 从 kv_cache.cursor() 造 positions(decode: [cursor]; prefill: arange(0, seq_len))
     buf = std::vector<int64_t>(seq_len);
     if (is_decode)
     {
@@ -340,8 +342,8 @@ Tensor qwen2_forward_paged_py(Qwen2ModelWeights &w, Qwen2Config &cfg, Tensor &ro
     }
     else
     {
-        // prefill: arange(0, seq_len)
-        std::iota(buf->begin(), buf->end(), 0);
+        // 支持直接 prefill 和前缀匹配后的 prefill
+        std::iota(buf->begin(), buf->end(), kv_cache.cursor());
     }
     positions_ptr = buf->data();
 
@@ -482,7 +484,32 @@ PYBIND11_MODULE(xstar_cpp, m)
         .def("cursor", &PagedKVCache::cursor)
         .def("block_table", &PagedKVCache::block_table)
         .def("block_size", &PagedKVCache::block_size)
-        .def("reset", &PagedKVCache::reset);
+        .def("reset", &PagedKVCache::reset)
+        .def("adopt_prefix", &PagedKVCache::adopt_prefix);
+
+    // RadixNode 结构体 (readonly, 测试用)
+    py::class_<RadixNode>(m, "RadixNode")
+        .def_readonly("key", &RadixNode::key)
+        .def_readonly("block_table", &RadixNode::block_table)
+        .def_readonly("lock_ref", &RadixNode::lock_ref)
+        .def_readonly("in_lru", &RadixNode::in_lru);
+
+    // RadixTree 类
+    py::class_<RadixTree>(m, "RadixTree")
+        .def(py::init<int>()) // block_size
+        .def("match_prefix", [](RadixTree &self, const std::vector<int> &tokens)
+             {
+        auto [len, node] = self.match_prefix(tokens);
+        return py::make_tuple(len, py::cast(node, py::return_value_policy::reference)); }, py::arg("tokens")) // reference 政策返回内部指针、不转移所有权
+        .def("insert", [](RadixTree &self, const std::vector<int> &tokens, const std::vector<int> &block_table)
+             {
+        RadixNode *node = self.insert(tokens, block_table);
+        return py::cast(node, py::return_value_policy::reference); }, py::arg("tokens"), py::arg("block_table")) // reference 政策返回内部指针、不转移所有权
+
+        .def("inc_lock_ref", &RadixTree::inc_lock_ref)
+        .def("dec_lock_ref", &RadixTree::dec_lock_ref)
+        .def("evict", &RadixTree::evict)
+        .def("lru_size", &RadixTree::lru_size);
 
     // 自由函数
     // pybind11/stl.h 自动转 std::vector<Tensor> ↔ Python list[Tensor]

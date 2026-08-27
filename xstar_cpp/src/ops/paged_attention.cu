@@ -68,11 +68,11 @@ __global__ void paged_attention_kernel(T *out, const T *Q,
         if constexpr (!IS_DECODE)
         {
             // 无 mask(纯 causal)且整块未来: 全掩贡献 0, 跳过; additive-mask 未来块有真值不跳
-            if (i >= qb * Br + Br)
+            if (i >= (seq_k - seq_q) + qb * Br + Br)
                 continue;
         }
         // causal 三态: 整块未来->skip(见上), 整块过去->full_past 快路径(免逐元素), 跨对角线->逐元素; full_past 仅无 mask 路径用
-        bool full_past = (i + Bc - 1 <= qb * Br);
+        bool full_past = (i + Bc - 1 <= (seq_k - seq_q) + qb * Br);
         float m_old = m;
         float l_old = l;
         l = 0;
@@ -148,7 +148,7 @@ __global__ void paged_attention_kernel(T *out, const T *Q,
                 // 跨对角线
                 for (int t = 0; t < COL_PER_THREAD; t++)
                 {
-                    if (global_query < seq_q && global_key + t < seq_k && global_query >= global_key + t)
+                    if (global_query < seq_q && global_key + t < seq_k && global_query + (seq_k - seq_q) >= global_key + t)
                     {
                         acc_s[t] = acc_s[t] * scalar;
                     }

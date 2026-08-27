@@ -7,7 +7,7 @@
  * Paged attention (M9 sub-block B, read half).
  * Reads K/V from BlockManager pool via block_table (logical block -> physical block_id), not from a contiguous buffer.
  *   decode:  Q=[nh,1,hd],  seq_k=cursor
- *   prefill: Q=[nh,seq,hd], seq_k=seq (self-attn)
+ *   prefill: Q=[nh,seq,hd], seq_k>=seq_q (self-attn when seq_k==seq_q; extend when seq_k>seq_q, e.g. radix adopt_prefix: Q = residual, K/V = full [0,cursor) via block_table)
  *   GQA: Q=nh heads, K/V=nkv heads, rep=nh/nkv
  * K/V element offset for logical token t:
  *   block=block_table[t/BS], slot=t%BS
@@ -17,6 +17,9 @@
  * block_table: device const int* len ceil(seq_k/BS).
  * batch=1; batch axis in grid dim -> future N only touches launcher.
  * Same online-softmax order as FA2 -> bit-exact vs contiguous path.
+ * Causal alignment: query rows are LOCAL to Q (residual), keys are ABSOLUTE ([0,seq_k)).
+ * offset = seq_k - seq_q; query local p attends keys <= offset + p.
+ * Skip/full_past/compare all use the absolute diagonal. Degenerates to old form when seq_k==seq_q.
  */
 Tensor paged_attention(const BlockManager &bm, int layer,
                        const Tensor &Q,
@@ -38,12 +41,17 @@ void paged_attention_launch(void *out, const void *Q,
  * Paged attention, multi-request (Phase 3): prefill varlen + decode multi-seq.
  *   prefill: Q=[sum_q, num_heads, hd] (varlen, concatenated);
  *            3D grid(ceil(max_seqlen_q/Br), num_seqs, num_heads);
- *            blockIdx.x=段内q块, y=seq, z=head; seq定位=直接下标 cu_seqlens_q[seq] (无二分);
- *            short-seg early-exit (qb*Br >= seq_q); causal INTRA-segment (seg-local).
+ *            blockIdx.x = intra-seg q block, y = seq, z = head; seq located by direct index cu_seqlens_q[seq] (no binary search);
+ *            short-seg early-exit (qb*Br >= seq_q); causal INTRA-segment (seg-local), extend form:
+ *            q_global = (seq_k-seq_q) + seg_q_pos vs k_global = seg_k_pos;
+ *            degenerates to self-attn causal when seq_k==seq_q (Phase3 full-prefill path unchanged).
  *   decode:  Q=[num_seqs, num_heads, hd] (1 Q token/seq);
  *            grid(ceil(num_seqs/NUM_WARPS), num_heads); NUM_WARPS seqs packed per block;
  *            per-seq seq_k from cu_seqlens_k; cu_seqlens_q UNUSED in decode.
- *   K/V read from pool via 2D block_table [num_seqs, max_blocks_per_seq] (logical block -> physical).
+ *   K/V read from pool via 2D block_table [num_seqs, max_blocks_per_seq] (logical block -> physical);
+ *            K/V spans the full seq_k (including radix-forked prefix blocks), Q covers only the extend segment.
+ *   caller contract: prefill takes TWO cu_seqlens (q = extend-segment cumsum, k = full-length cumsum);
+ *            k segment length >= q segment length (extend). decode cu_seqlens_k semantics unchanged (cumsum of cursors).
  *   N independent PagedKVCache (per-seq block_table + cursor); caller (forward) gathers them into the 2D block_table + cu_seqlens arrays (vLLM form: per-seq List[int] -> [num_seqs, max_blocks]).
  *   max_seqlen_q: max seg q-length (prefill grid.x basis; ignored in decode).
  *   GQA: Q=num_heads, K/V=num_kv_heads, rep=num_heads/num_kv_heads.

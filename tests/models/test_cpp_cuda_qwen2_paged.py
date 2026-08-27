@@ -663,3 +663,142 @@ def test_qwen2_forward_multi_real_matches_single_paged():
     for j in range(4):
         print(f"multi  seq{j}: " + tokenizer.decode(multi_output_ids[j]))
         print(f"single seq{j}: " + tokenizer.decode(single_output_ids[j]))
+
+
+# adopt_prefix + extend prefill 的 residual 段 == 全量 prefill 对应段，bit-exact
+def test_extend_prefill_bit_exact_matches_full_prefill():
+    py_model, tokenizer = load_reference_model(qwen2_model_path, device="cuda")
+
+    cfg = xstar_cpp.parse_config_json(open(qwen2_model_path + "/config.json").read())
+    mf = xstar_cpp.MMapFile(qwen2_model_path + "/model.safetensors")
+    w = xstar_cpp.load_qwen2_weights(mf, cfg, xstar_cpp.Device.CUDA)
+    rope_cache = py_model.model.positional_encoder._freq_cis_cache
+    rope_cache_cpu = torch_to_cpp(rope_cache.cpu())
+    rope_cache_cuda = xstar_cpp.to_cuda(rope_cache_cpu)
+    dtype = xstar_cpp.DType.BFloat16
+    device = xstar_cpp.Device.CUDA
+
+    prompt = (
+        "The transformer architecture revolutionized natural language processing by "
+        "replacing recurrent networks with self-attention mechanisms. Each layer "
+        "computes query, key, and value projections, allowing every token to attend "
+        "to all previous positions in the sequence. Paged attention further improves "
+        "efficiency by storing key-value pairs in fixed-size blocks, which eliminates "
+        "memory fragmentation and enables flexible sharing of prefix caches between "
+        "requests."
+    )
+
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.squeeze(0)
+    assert len(input_ids) >= 64  # 测试前提: 至少 4 块, 切点 k=32 才合法
+
+    cu_seqlens_q_host = [0, len(input_ids)]
+
+    block_size = 16
+    nkv = cfg.num_key_value_heads
+    head_dim = cfg.hidden_size // cfg.num_attention_heads
+    dtype_size = 2
+    kv_slot_bytes = nkv * head_dim * dtype_size * 2
+    num_layers = cfg.num_hidden_layers
+    max_seq_len = cfg.max_position_embeddings
+    num_blocks = math.ceil(max_seq_len / block_size)
+    mask = None
+
+    bm_full = xstar_cpp.BlockManager(
+        num_blocks, block_size, kv_slot_bytes, device, num_layers
+    )
+    kv_full = [
+        xstar_cpp.PagedKVCache(nkv, head_dim, max_seq_len, block_size, dtype, device)
+    ]
+
+    full_prefill_cuda = xstar_cpp.qwen2_forward_multi(
+        w,
+        cfg,
+        rope_cache_cuda,
+        bm_full,
+        kv_full,
+        False,
+        input_ids.numpy(),
+        cu_seqlens_q_host,
+    )
+    full_prefill = cpp_to_torch(
+        xstar_cpp.to_cpu(full_prefill_cuda), [len(input_ids), cfg.vocab_size]
+    )
+
+    bm_ext = xstar_cpp.BlockManager(
+        num_blocks, block_size, kv_slot_bytes, device, num_layers
+    )
+    kv_ext = [
+        xstar_cpp.PagedKVCache(nkv, head_dim, max_seq_len, block_size, dtype, device)
+    ]
+    kv_donner = [
+        xstar_cpp.PagedKVCache(nkv, head_dim, max_seq_len, block_size, dtype, device)
+    ]
+
+    donner_prefill_cuda = xstar_cpp.qwen2_forward_multi(
+        w,
+        cfg,
+        rope_cache_cuda,
+        bm_ext,
+        kv_donner,
+        False,
+        input_ids.numpy()[:32],
+        [0, 32],
+    )
+
+    prefix_blocks = bm_ext.fork(kv_donner[0].block_table())
+    kv_ext[0].adopt_prefix(prefix_blocks, 32)
+
+    ext_prefill_cuda = xstar_cpp.qwen2_forward_multi(
+        w,
+        cfg,
+        rope_cache_cuda,
+        bm_ext,
+        kv_ext,
+        False,
+        input_ids.numpy()[32:],
+        [0, len(input_ids) - 32],
+    )
+    ext_prefill = cpp_to_torch(
+        xstar_cpp.to_cpu(ext_prefill_cuda), [len(input_ids) - 32, cfg.vocab_size]
+    )
+
+    assert torch.equal(
+        ext_prefill, full_prefill[32:]
+    ), f"ext_prefill={ext_prefill} full_prefill[32:]={full_prefill[32:]}"
+    assert kv_ext[0].cursor() == len(input_ids)
+    assert len(kv_ext[0].block_table()) == math.ceil(len(input_ids) / 16)
+    assert bm_ext.num_allocated() == math.ceil(len(input_ids) / 16)
+
+
+# adopt_prefix 的三个 guard（空前缀 / matched_len 不匹配 / 非 fresh cache）
+def test_adopt_prefix_rejects_invalid_inputs():
+    cfg = xstar_cpp.parse_config_json(open(qwen2_model_path + "/config.json").read())
+    dtype = xstar_cpp.DType.BFloat16
+    device = xstar_cpp.Device.CUDA
+
+    block_size = 16
+    nkv = cfg.num_key_value_heads
+    head_dim = cfg.hidden_size // cfg.num_attention_heads
+    max_seq_len = cfg.max_position_embeddings
+
+    kv_cache = xstar_cpp.PagedKVCache(
+        nkv, head_dim, max_seq_len, block_size, dtype, device
+    )
+
+    with pytest.raises(RuntimeError, match="empty prefix"):
+        kv_cache.adopt_prefix([], 0)
+
+    kv_cache = xstar_cpp.PagedKVCache(
+        nkv, head_dim, max_seq_len, block_size, dtype, device
+    )
+
+    with pytest.raises(RuntimeError, match="matched_len"):
+        kv_cache.adopt_prefix([7, 8], 16)
+
+    kv_cache = xstar_cpp.PagedKVCache(
+        nkv, head_dim, max_seq_len, block_size, dtype, device
+    )
+    kv_cache.adopt_prefix([7, 8], 32)
+
+    with pytest.raises(RuntimeError, match="not fresh"):
+        kv_cache.adopt_prefix([9], 16)

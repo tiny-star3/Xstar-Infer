@@ -47,18 +47,21 @@ public:
 
     /**
      * paged_write this layer's rope-output K / raw V into bm's pool at the cursor's slot(s).
-     *   is_decode=false (prefill): K,V are (nkv, seq, hd); alloc ceil(seq/BS) blocks (if cursor==0), build slot_mapping = block_table[logical]*BS + slot_in_block for each token, paged_write.
-     *     cursor=seq.
+     *   is_decode=false (prefill): K,V are (nkv, seq, hd). Two forms:
+     *     (a) fresh prefill (cursor==0): alloc ceil(seq/BS) blocks, cursor=seq.  (no adopt_prefix needed)
+     *     (b) extend prefill (cursor==matched_len>0, after adopt_prefix): write the RESIDUAL [cursor, cursor+seq), append ceil(resid/BS) new blocks onto block_table_ + d_block_table_.
+     *     build slot_mapping = block_table_[logical]*BS + slot_in_block for each token, paged_write.
      *   is_decode=true  (decode):  K,V are (nkv, 1, hd); cursor++ (ONCE at layer 0, same as KVCache), alloc +1 block if cursor crosses a boundary, slot_mapping = [last_block_id*BS + (cursor-1)%BS], paged_write.
      *     All layers write the same slot; d_block_table is current.
      * Caller passes K/V AFTER rope (K) / head_split only (V); bm is the shared pool.
      *
      * CONTRACT (caller/forward must defend; cache does NOT):
      *   - forward calls write in order 0..N-1, no skipped layers (cursor advanced at layer 0).
-     *   - prefill ONCE on a fresh cache (cursor=0); a second prefill frees old blocks + re-allocs.
+     *   - prefill ONCE on a fresh cache (cursor=0); a second prefill THROWS ("second prefill; adopt_prefix() first") -- never re-allocs.
      *   - bm must have enough free blocks for the prompt (prefill) / +1 (decode boundary) -- throws "paged kv cache: insufficient free blocks" (propagated from bm.alloc) if not.
      *   - bm.num_layers() spans all layers; write targets layer `layer` in the pool.
      *   - block_size == bm.block_size() (checked at construction).
+     *   - extend prefill: call adopt_prefix(prefix, matched_len) FIRST, then write() writes only the residual [cursor, cursor+seq).
      * Throws "paged kv cache full: cursor >= max_seq_len" when a decode would exceed max_seq_len.
      */
     void write(std::int64_t layer, BlockManager &bm, const Tensor &K, const Tensor &V, bool is_decode);
@@ -68,6 +71,7 @@ public:
      * Lets the caller gather a whole-batch slot_mapping once and paged_write all seqs in one launch (vLLM reshape_and_cache form).
      * Gated layer==0; MUST precede slot_mapping build (decode slot uses post-increment cursor, prefill slot uses the grown block_table).
      *   len: prefill = prompt length (drives ceil(len/BS) alloc); decode = 1 (unused, alloc is cursor%BS-gated).
+     *   extend prefill: same as write -- after adopt_prefix(), len is the RESIDUAL length, appended to the adopted block_table_.
      */
     void prepare_meta(std::int64_t layer, BlockManager &bm, std::int64_t len, bool is_decode);
 
@@ -77,6 +81,21 @@ public:
      * Does NOT touch bm (no reference by design).
      */
     void reset();
+
+    /**
+     * Radix path: install forked prefix blocks + start at matched_len.
+     * Pre:
+     *   fresh cache (cursor_==0, block_table_ empty, d_block_table_==nullptr); throws otherwise.
+     *   prefix_blocks non-empty (empty prefix = no residual, rejected).
+     *   matched_len == prefix_blocks.size() * block_size (whole blocks only).
+     *   matched_len < max_seq_len (else nothing left to extend).
+     * Post:
+     *   cursor_ = matched_len, block_table_ = prefix_blocks, d_block_table_ alloc'd + h2d.
+     *   adopted_ = true.  Following prefill writes residual [cursor, cursor+seq).
+     *   depth scoped: recursive delete of prefix subtree, caller must drop its own ref (bm.free) -- tree holds its own.
+     *   ownership: cache takes over the bm.fork ref; freed via bm.free(block_table()) at finish/preempt.
+     */
+    void adopt_prefix(const std::vector<int> &prefix_blocks, std::int64_t matched_len);
 
 private:
     std::int64_t num_kv_heads_;
@@ -90,4 +109,5 @@ private:
     int *d_block_table_;             // device copy, cuda_alloc'd; resized+recopied when block_table_ grows
     std::int64_t d_block_table_cap_; // capacity of d_block_table_ (in ints), to know when to realloc
     bool block_size_checked_;        // one-shot: first write asserts bm.block_size()==block_size_
+    bool adopted_;                   // radix: true after adopt_prefix(), gates 2nd-prefill reject; reset() clears it
 };
