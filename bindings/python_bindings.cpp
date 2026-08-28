@@ -509,7 +509,8 @@ PYBIND11_MODULE(xstar_cpp, m)
         .def("inc_lock_ref", &RadixTree::inc_lock_ref)
         .def("dec_lock_ref", &RadixTree::dec_lock_ref)
         .def("evict", &RadixTree::evict)
-        .def("lru_size", &RadixTree::lru_size);
+        .def("lru_size", &RadixTree::lru_size)
+        .def("evictable_blocks", &RadixTree::evictable_blocks);
 
     // 自由函数
     // pybind11/stl.h 自动转 std::vector<Tensor> ↔ Python list[Tensor]

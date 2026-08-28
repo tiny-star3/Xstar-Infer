@@ -130,6 +130,11 @@ public:
      */
     int lru_size() const;
 
+    /**
+     * evictable block count.
+     */
+    int evictable_blocks() const;
+
 private:
     /**
      * Split child at block-aligned split_len: new_node takes key[:split_len]+block_table[:split_len/BS], child keeps the rest.
@@ -146,4 +151,5 @@ private:
     RadixNode *root_;
     LRUList lru_;
     int block_size_;
+    int evictable_blocks_;
 };

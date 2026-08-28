@@ -80,6 +80,7 @@ RadixTree::RadixTree(int block_size)
     block_size_ = block_size;
     root_ = new RadixNode();
     root_->lock_ref = 1;
+    evictable_blocks_ = 0;
 }
 
 RadixTree::~RadixTree()
@@ -175,6 +176,7 @@ RadixNode *RadixTree::insert(const std::vector<int> &tokens, const std::vector<i
             leaf->key = std::vector<int>(tokens.begin() + matched_length, tokens.begin() + total);
             leaf->block_table = std::vector<int>(block_table.begin() + matched_length / block_size_, block_table.begin() + total / block_size_);
             lru_.push_back(leaf);
+            evictable_blocks_ += leaf->block_table.size();
             now->children[std::vector<int>(leaf->key.begin(), leaf->key.begin() + block_size_)] = leaf;
             return leaf;
         }
@@ -193,6 +195,7 @@ RadixNode *RadixTree::insert(const std::vector<int> &tokens, const std::vector<i
             leaf->key = std::vector<int>(tokens.begin() + matched_length, tokens.begin() + total);
             leaf->block_table = std::vector<int>(block_table.begin() + matched_length / block_size_, block_table.begin() + total / block_size_);
             lru_.push_back(leaf);
+            evictable_blocks_ += leaf->block_table.size();
             now->children[std::vector<int>(leaf->key.begin(), leaf->key.begin() + block_size_)] = leaf;
             return leaf;
         }
@@ -208,6 +211,7 @@ void RadixTree::inc_lock_ref(RadixNode *node)
     {
         if (node->lock_ref++ == 0 && node->in_lru)
         {
+            evictable_blocks_ -= node->block_table.size();
             lru_.remove(node);
         }
         node = node->parent;
@@ -221,6 +225,7 @@ void RadixTree::dec_lock_ref(RadixNode *node)
         if (--node->lock_ref == 0 && !node->in_lru && node->children.empty())
         {
             lru_.push_back(node);
+            evictable_blocks_ += node->block_table.size();
         }
         node = node->parent;
     }
@@ -233,11 +238,13 @@ int RadixTree::evict(int need_blocks, BlockManager &bm)
     {
         RadixNode *node = lru_.pop_front();
         RadixNode *parent = node->parent;
+        evictable_blocks_ -= node->block_table.size();
         freed_blocks += node->block_table.size();
         _delete_leaf(node, bm);
         if (parent != root_ && parent->children.empty() && parent->lock_ref == 0 && !parent->in_lru)
         {
             lru_.push_back(parent);
+            evictable_blocks_ += parent->block_table.size();
         }
     }
     return freed_blocks;
@@ -246,6 +253,11 @@ int RadixTree::evict(int need_blocks, BlockManager &bm)
 int RadixTree::lru_size() const
 {
     return lru_.size();
+}
+
+int RadixTree::evictable_blocks() const
+{
+    return evictable_blocks_;
 }
 
 RadixNode *RadixTree::_split_node(RadixNode *child, int split_len)
@@ -269,6 +281,10 @@ RadixNode *RadixTree::_split_node(RadixNode *child, int split_len)
     node->lock_ref = child->lock_ref;
     child->parent->children[node_first_block] = node;
     child->parent = node;
+    if (child->in_lru)
+    {
+        evictable_blocks_ -= node->block_table.size();
+    }
 
     return node;
 }
@@ -279,6 +295,7 @@ void RadixTree::_delete_leaf(RadixNode *node, BlockManager &bm)
     node->parent->children.erase(first_block);
     if (node->in_lru)
     {
+        evictable_blocks_ -= node->block_table.size();
         lru_.remove(node);
     }
     bm.free(node->block_table);

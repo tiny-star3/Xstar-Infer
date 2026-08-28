@@ -37,16 +37,6 @@ class Worker:
             input_ids = np.concatenate([np.array(s, dtype=np.int64) for s in seqs])
             for s in seqs:
                 cu_seqlens.append(cu_seqlens[-1] + len(s))
-            for req in reqs:
-                if req.kv is None:
-                    req.kv = xstar_cpp.PagedKVCache(
-                        self.nkv,
-                        self.head_dim,
-                        self.max_seq_len,
-                        self.block_size,
-                        self.dtype,
-                        self.device,
-                    )
 
         kv_caches = [req.kv for req in reqs]
 
