@@ -1,8 +1,5 @@
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
-
-#include <cuda_runtime.h>
-#include <cuda_bf16.h>
 #include <float.h>
 #include <cmath>
 

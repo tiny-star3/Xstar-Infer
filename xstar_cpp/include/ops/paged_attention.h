@@ -48,6 +48,7 @@ void paged_attention_launch(void *out, const void *Q,
  *   decode:  Q=[num_seqs, num_heads, hd] (1 Q token/seq);
  *            grid(ceil(num_seqs/NUM_WARPS), num_heads); NUM_WARPS seqs packed per block;
  *            per-seq seq_k from cu_seqlens_k; cu_seqlens_q UNUSED in decode.
+ *            max_seqlen_k (host) = max per-seq seq_k: when it exceeds SPLIT_KV_THRESHOLD, decode routes to the split-KV two-stage kernel (per-split partial + LSE merge), else the single decode kernel. Unused in prefill.
  *   K/V read from pool via 2D block_table [num_seqs, max_blocks_per_seq] (logical block -> physical);
  *            K/V spans the full seq_k (including radix-forked prefix blocks), Q covers only the extend segment.
  *   caller contract: prefill takes TWO cu_seqlens (q = extend-segment cumsum, k = full-length cumsum);
@@ -63,7 +64,7 @@ Tensor paged_attention(const BlockManager &bm, int layer,
                        const int *d_block_table_2d, // [num_seqs, max_blocks_per_seq], device
                        const int *cu_seqlens_q,     // [num_seqs+1], device; decode: [0,1,2,..]
                        const int *cu_seqlens_k,     // [num_seqs+1], device; decode: cumsum(cursor)
-                       int num_seqs, int max_blocks_per_seq, int max_seqlen_q,
+                       int num_seqs, int max_blocks_per_seq, int max_seqlen_q, int max_seqlen_k,
                        int num_heads, int num_kv_heads,
                        bool is_decode);
 
@@ -84,3 +85,17 @@ void paged_attention_prefill_launch(void *out, const void *Q, const void *pool,
                                     std::int64_t layer_stride_elems, int block_elems, int layer,
                                     int num_heads, int num_kv_heads, int head_dim, int block_size,
                                     DType dtype);
+
+void paged_attention_decode_split_launch(float *mid_o, float *mid_lse,
+                                         const void *Q, const void *pool,
+                                         const int *d_block_table_2d, const int *cu_seqlens_k,
+                                         int num_seqs, int max_blocks_per_seq, int num_splits,
+                                         std::int64_t layer_stride_elems, int block_elems, int layer,
+                                         int num_heads, int num_kv_heads, int head_dim, int block_size,
+                                         DType dtype);
+
+void paged_attention_decode_split_reduce_launch(void *out,
+                                                const float *mid_o, const float *mid_lse,
+                                                int num_seqs, int num_splits,
+                                                int num_heads, int head_dim,
+                                                DType dtype);

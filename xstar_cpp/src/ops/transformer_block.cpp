@@ -314,9 +314,11 @@ Tensor transformer_block(const Tensor &x,
 
     // cu_seqlens_k (device) = [0] + cumsum(post-write cursors)
     std::vector<int> cu_seqlens_k(num_seqs + 1, 0);
+    int max_seqlen_k = 0;
     for (int s = 0; s < num_seqs; s++)
     {
         cu_seqlens_k[s + 1] = cu_seqlens_k[s] + (int)kv_caches[s]->cursor();
+        max_seqlen_k = std::max(max_seqlen_k, (int)kv_caches[s]->cursor());
     }
     int *d_cu_seqlens_k = static_cast<int *>(cuda_alloc((num_seqs + 1) * sizeof(int)));
     cuda_memcpy_h2d(d_cu_seqlens_k, cu_seqlens_k.data(), (num_seqs + 1) * sizeof(int));
@@ -340,7 +342,7 @@ Tensor transformer_block(const Tensor &x,
     }
 
     // 多请求 Paged_Attention 仅 CUDA(CPU 回退到四步复合 attention)
-    Tensor attn_out = paged_attention(bm, layer_idx, Q_head_split, d_block_table_2d, d_cu_seqlens_q, d_cu_seqlens_k, num_seqs, max_blocks, max_seqlen_q, num_heads, num_key_value_heads, is_decode);
+    Tensor attn_out = paged_attention(bm, layer_idx, Q_head_split, d_block_table_2d, d_cu_seqlens_q, d_cu_seqlens_k, num_seqs, max_blocks, max_seqlen_q, max_seqlen_k, num_heads, num_key_value_heads, is_decode);
 
     cuda_free(d_block_table_2d);
     cuda_free(d_cu_seqlens_k);

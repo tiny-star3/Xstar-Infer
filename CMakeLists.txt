@@ -68,6 +68,7 @@ add_library(xstar_cpp_core STATIC
     xstar_cpp/src/ops/paged_attention_prefill.cu
 
     xstar_cpp/src/radix_cache.cpp
+    xstar_cpp/src/ops/paged_attention_decode_split.cu
 )
 target_include_directories(xstar_cpp_core PUBLIC xstar_cpp/include)
 # 链 CUDA runtime, PUBLIC 因静态库将来要透传给链它的 .so(用 PRIVATE 则 .so 链接阶段找不到 cudart)
