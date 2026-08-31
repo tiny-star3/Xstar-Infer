@@ -197,7 +197,7 @@ void PagedKVCache::reset()
     d_block_table_cap_ = 0;
 }
 
-void PagedKVCache::adopt_prefix(const std::vector<int> &prefix_blocks, std::int64_t matched_len)
+void PagedKVCache::adopt_prefix(const std::vector<int> &prefix_blocks)
 {
     if (cursor_ != 0 || !block_table_.empty() || d_block_table_)
     {
@@ -207,10 +207,9 @@ void PagedKVCache::adopt_prefix(const std::vector<int> &prefix_blocks, std::int6
     {
         throw std::runtime_error("empty prefix; adopt does nothing");
     }
-    if (prefix_blocks.size() * block_size_ != (size_t)matched_len)
-    {
-        throw std::runtime_error("matched_len != prefix_blocks.size() * block_size");
-    }
+
+    std::int64_t matched_len = prefix_blocks.size() * block_size_;
+
     if (matched_len >= max_seq_len_)
     {
         throw std::runtime_error("matched_len >= max_seq_len");

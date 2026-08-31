@@ -33,7 +33,10 @@ class Worker:
             cu_seqlens = list(range(len(reqs) + 1))
         else:
             # 可能是 re-prefill 之前已经计算的部分 generated_ids
-            seqs = [req.prompt_ids + req.generated_ids for req in reqs]
+            # 去掉前缀共享
+            seqs = [
+                (req.prompt_ids + req.generated_ids)[req.kv.cursor() :] for req in reqs
+            ]
             input_ids = np.concatenate([np.array(s, dtype=np.int64) for s in seqs])
             for s in seqs:
                 cu_seqlens.append(cu_seqlens[-1] + len(s))

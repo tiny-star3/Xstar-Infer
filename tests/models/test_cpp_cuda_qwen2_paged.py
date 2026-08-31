@@ -746,7 +746,7 @@ def test_extend_prefill_bit_exact_matches_full_prefill():
     )
 
     prefix_blocks = bm_ext.fork(kv_donner[0].block_table())
-    kv_ext[0].adopt_prefix(prefix_blocks, 32)
+    kv_ext[0].adopt_prefix(prefix_blocks)
 
     ext_prefill_cuda = xstar_cpp.qwen2_forward_multi(
         w,
@@ -786,19 +786,19 @@ def test_adopt_prefix_rejects_invalid_inputs():
     )
 
     with pytest.raises(RuntimeError, match="empty prefix"):
-        kv_cache.adopt_prefix([], 0)
+        kv_cache.adopt_prefix([])
 
     kv_cache = xstar_cpp.PagedKVCache(
         nkv, head_dim, max_seq_len, block_size, dtype, device
     )
 
     with pytest.raises(RuntimeError, match="matched_len"):
-        kv_cache.adopt_prefix([7, 8], 16)
+        kv_cache.adopt_prefix(list(range(max_seq_len // block_size)))
 
     kv_cache = xstar_cpp.PagedKVCache(
         nkv, head_dim, max_seq_len, block_size, dtype, device
     )
-    kv_cache.adopt_prefix([7, 8], 32)
+    kv_cache.adopt_prefix([7, 8])
 
     with pytest.raises(RuntimeError, match="not fresh"):
-        kv_cache.adopt_prefix([9], 16)
+        kv_cache.adopt_prefix([9])

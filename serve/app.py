@@ -48,13 +48,14 @@ async def lifespan(app):
     kv_slot_bytes = nkv * head_dim * dtype_size * 2
     num_layers = cfg.num_hidden_layers
     max_seq_len = cfg.max_position_embeddings
-    num_blocks = math.ceil(max_seq_len / block_size) * 8
+    num_blocks = math.ceil(max_seq_len / block_size) * 8  # 150
 
     bm = xstar_cpp.BlockManager(
         num_blocks, block_size, kv_slot_bytes, device, num_layers
     )
     scheduler = Scheduler(
-        Worker(weights, cfg, rope_cache_cuda, bm, block_size, dtype, device)
+        Worker(weights, cfg, rope_cache_cuda, bm, block_size, dtype, device),
+        use_radix=True,
     )
     scheduler.start()
 
@@ -103,5 +104,12 @@ async def stream(req):
         if token is None:
             break
         yield sse(tokenizer.decode(token))
+
+    # 测试
+    # print(
+    #     f"[radix] allocated={bm.num_allocated()} lru={scheduler.radix_tree.lru_size()} "
+    #     f"evictable={scheduler.radix_tree.evictable_blocks()} matched={request.radix_matched}",
+    #     flush=True,
+    # )
 
     yield "data: [DONE]\n\n"

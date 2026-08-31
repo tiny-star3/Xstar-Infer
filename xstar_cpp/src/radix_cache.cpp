@@ -96,10 +96,11 @@ RadixTree::~RadixTree()
     DeleteTree(root_);
 }
 
-std::pair<int, RadixNode *> RadixTree::match_prefix(const std::vector<int> &tokens)
+std::pair<std::vector<int>, RadixNode *> RadixTree::match_prefix(const std::vector<int> &tokens)
 {
     // 输入截断, 残余不参与 match
     int total = (tokens.size() / block_size_) * block_size_;
+    std::vector<int> matched_blocks;
     int matched_length = 0;
     RadixNode *now = root_;
     while (now)
@@ -118,34 +119,35 @@ std::pair<int, RadixNode *> RadixTree::match_prefix(const std::vector<int> &toke
             }
         }
         matched_length += m_key;
+        matched_blocks.insert(matched_blocks.end(), now->block_table.begin(), now->block_table.begin() + m_key / block_size_);
         // 内部分叉
         if (m_key < now->key.size())
         {
-            return std::make_pair(matched_length / block_size_ * block_size_, now);
+            return std::make_pair(matched_blocks, now);
         }
         // tokens 比完
         if (matched_length >= total)
         {
-            return std::make_pair(matched_length / block_size_ * block_size_, now);
+            return std::make_pair(matched_blocks, now);
         }
         // 余下不足一块, 无法查叉
         if (total - matched_length < block_size_)
         {
-            return std::make_pair(matched_length / block_size_ * block_size_, now);
+            return std::make_pair(matched_blocks, now);
         }
         std::vector<int> first_block(tokens.begin() + matched_length, tokens.begin() + matched_length + block_size_);
         auto it = now->children.find(first_block);
         // 没这叉, 停
         if (it == now->children.end())
         {
-            return std::make_pair(matched_length / block_size_ * block_size_, now);
+            return std::make_pair(matched_blocks, now);
         }
         now = it->second;
     }
-    return {matched_length / block_size_ * block_size_, root_};
+    return {matched_blocks, root_};
 }
 
-RadixNode *RadixTree::insert(const std::vector<int> &tokens, const std::vector<int> &block_table)
+RadixNode *RadixTree::insert(const std::vector<int> &tokens, const std::vector<int> &block_table, BlockManager &bm)
 {
     // 输入截断, 残余不参与插入
     int total = (tokens.size() / block_size_) * block_size_;
@@ -175,6 +177,7 @@ RadixNode *RadixTree::insert(const std::vector<int> &tokens, const std::vector<i
             leaf->parent = now;
             leaf->key = std::vector<int>(tokens.begin() + matched_length, tokens.begin() + total);
             leaf->block_table = std::vector<int>(block_table.begin() + matched_length / block_size_, block_table.begin() + total / block_size_);
+            bm.ref(leaf->block_table);
             lru_.push_back(leaf);
             evictable_blocks_ += leaf->block_table.size();
             now->children[std::vector<int>(leaf->key.begin(), leaf->key.begin() + block_size_)] = leaf;
@@ -194,6 +197,13 @@ RadixNode *RadixTree::insert(const std::vector<int> &tokens, const std::vector<i
             leaf->parent = now;
             leaf->key = std::vector<int>(tokens.begin() + matched_length, tokens.begin() + total);
             leaf->block_table = std::vector<int>(block_table.begin() + matched_length / block_size_, block_table.begin() + total / block_size_);
+            bm.ref(leaf->block_table);
+            // 如果当前节点在 lru_list, 移除
+            if (now->in_lru)
+            {
+                evictable_blocks_ -= now->block_table.size();
+                lru_.remove(now);
+            }
             lru_.push_back(leaf);
             evictable_blocks_ += leaf->block_table.size();
             now->children[std::vector<int>(leaf->key.begin(), leaf->key.begin() + block_size_)] = leaf;

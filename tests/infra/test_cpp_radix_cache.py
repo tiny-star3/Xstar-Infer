@@ -8,38 +8,48 @@ import xstar_cpp
 # 空树匹配
 def test_match_empty():
     tree = xstar_cpp.RadixTree(4)
-    matched, _ = tree.match_prefix([1, 2, 3, 4])
+    blocks, _ = tree.match_prefix([1, 2, 3, 4])
 
-    assert matched == 0
+    assert len(blocks) == 0
 
 
 # 单节点 + 回读
 def test_insert_then_match():
-    tree = xstar_cpp.RadixTree(4)
-    tree.insert([1, 2, 3, 4], [10])
+    block_size = 4
+    tree = xstar_cpp.RadixTree(block_size)
+    bm = xstar_cpp.BlockManager(10, block_size, 512, xstar_cpp.Device.CUDA)
+    block_table = bm.alloc(1)
+    tree.insert([1, 2, 3, 4], block_table, bm)
     # 前4命中, 后4残留不匹配
-    matched, node = tree.match_prefix([1, 2, 3, 4, 5, 6, 7, 8])
+    blocks, node = tree.match_prefix([1, 2, 3, 4, 5, 6, 7, 8])
 
     # block_size=4, 余下 [5..8] 没这叉 → 停在 leaf
-    assert matched == 4
+    assert blocks == block_table
     assert node.key == [1, 2, 3, 4]
-    assert node.block_table == [10]
+    assert node.block_table == block_table
 
 
 # 全命中不覆盖
 def test_insert_full_match_no_overwrite():
-    tree = xstar_cpp.RadixTree(4)
-    tree.insert([1, 2, 3, 4], [10])
-    node = tree.insert([1, 2, 3, 4], [99])
+    block_size = 4
+    tree = xstar_cpp.RadixTree(block_size)
+    bm = xstar_cpp.BlockManager(10, block_size, 512, xstar_cpp.Device.CUDA)
+    block_table = bm.alloc(1)
+    block_table2 = bm.alloc(1)
+    tree.insert([1, 2, 3, 4], block_table, bm)
+    node = tree.insert([1, 2, 3, 4], block_table2, bm)
 
-    assert node.block_table == [10]
+    assert node.block_table == block_table
     assert tree.lru_size() == 1
 
 
 # 残留不参与
 def test_insert_truncation():
-    tree = xstar_cpp.RadixTree(4)
-    node = tree.insert([1, 2, 3, 4, 5, 6], [10, 20])
+    block_size = 4
+    tree = xstar_cpp.RadixTree(block_size)
+    bm = xstar_cpp.BlockManager(10, block_size, 512, xstar_cpp.Device.CUDA)
+    block_table = bm.alloc(2)
+    node = tree.insert([1, 2, 3, 4, 5, 6], block_table, bm)
 
     assert node.key == [1, 2, 3, 4]
     assert tree.lru_size() == 1
@@ -47,21 +57,29 @@ def test_insert_truncation():
 
 # 共享前 4 分叉触发 split, 两条分支都能完整穿到 leaf
 def test_split_aligned():
-    tree = xstar_cpp.RadixTree(4)
-    tree.insert([1, 2, 3, 4, 5, 6, 7, 8], [10, 20])
-    tree.insert([1, 2, 3, 4, 9, 9, 9, 9], [10, 40])
-    m1, _ = tree.match_prefix([1, 2, 3, 4, 5, 6, 7, 8])
-    m2, _ = tree.match_prefix([1, 2, 3, 4, 9, 9, 9, 9])
+    block_size = 4
+    tree = xstar_cpp.RadixTree(block_size)
+    bm = xstar_cpp.BlockManager(10, block_size, 512, xstar_cpp.Device.CUDA)
+    block_table = bm.alloc(2)
+    block_table2 = bm.alloc(1)
+    tree.insert([1, 2, 3, 4, 5, 6, 7, 8], block_table, bm)
+    tree.insert([1, 2, 3, 4, 9, 9, 9, 9], [block_table[0], block_table2[0]], bm)
+    blocks1, _ = tree.match_prefix([1, 2, 3, 4, 5, 6, 7, 8])
+    blocks2, _ = tree.match_prefix([1, 2, 3, 4, 9, 9, 9, 9])
 
-    assert m1 == 8 and m2 == 8
+    assert blocks1 == block_table and blocks2 == [block_table[0], block_table2[0]]
     assert tree.lru_size() == 2
 
 
 # split 后旧 child 的 in_lru 状态
 def test_split_leave_child_lru():
-    tree = xstar_cpp.RadixTree(4)
-    tree.insert([1, 2, 3, 4, 5, 6, 7, 8], [10, 20])
-    tree.insert([1, 2, 3, 4, 9, 9, 9, 9], [10, 40])
+    block_size = 4
+    tree = xstar_cpp.RadixTree(block_size)
+    bm = xstar_cpp.BlockManager(10, block_size, 512, xstar_cpp.Device.CUDA)
+    block_table = bm.alloc(2)
+    block_table2 = bm.alloc(1)
+    tree.insert([1, 2, 3, 4, 5, 6, 7, 8], block_table, bm)
+    tree.insert([1, 2, 3, 4, 9, 9, 9, 9], [block_table[0], block_table2[0]], bm)
     _, node = tree.match_prefix([1, 2, 3, 4, 5, 6, 7, 8])
 
     assert tree.lru_size() == 2
@@ -70,8 +88,11 @@ def test_split_leave_child_lru():
 
 # 0→1 从 LRU 移除
 def test_inc_lock_ref_removes_from_lru():
-    tree = xstar_cpp.RadixTree(4)
-    leaf = tree.insert([1, 2, 3, 4], [10])
+    block_size = 4
+    tree = xstar_cpp.RadixTree(block_size)
+    bm = xstar_cpp.BlockManager(10, block_size, 512, xstar_cpp.Device.CUDA)
+    block_table = bm.alloc(1)
+    leaf = tree.insert([1, 2, 3, 4], block_table, bm)
     tree.inc_lock_ref(leaf)
 
     assert tree.lru_size() == 0 and leaf.lock_ref == 1 and leaf.in_lru == False
@@ -79,8 +100,11 @@ def test_inc_lock_ref_removes_from_lru():
 
 # 1→0 回 LRU
 def test_dec_lock_ref_returns_to_lru():
-    tree = xstar_cpp.RadixTree(4)
-    leaf = tree.insert([1, 2, 3, 4], [10])
+    block_size = 4
+    tree = xstar_cpp.RadixTree(block_size)
+    bm = xstar_cpp.BlockManager(10, block_size, 512, xstar_cpp.Device.CUDA)
+    block_table = bm.alloc(1)
+    leaf = tree.insert([1, 2, 3, 4], block_table, bm)
     tree.inc_lock_ref(leaf)
     tree.dec_lock_ref(leaf)
 
@@ -89,9 +113,13 @@ def test_dec_lock_ref_returns_to_lru():
 
 # inc child 会把 parent upper 也 pin
 def test_inc_lock_ref_walks_up():
-    tree = xstar_cpp.RadixTree(4)
-    tree.insert([1, 2, 3, 4, 5, 6, 7, 8], [10, 20])
-    tree.insert([1, 2, 3, 4, 9, 9, 9, 9], [10, 40])
+    block_size = 4
+    tree = xstar_cpp.RadixTree(block_size)
+    bm = xstar_cpp.BlockManager(10, block_size, 512, xstar_cpp.Device.CUDA)
+    block_table = bm.alloc(2)
+    block_table2 = bm.alloc(1)
+    tree.insert([1, 2, 3, 4, 5, 6, 7, 8], block_table, bm)
+    tree.insert([1, 2, 3, 4, 9, 9, 9, 9], [block_table[0], block_table2[0]], bm)
     _, upper = tree.match_prefix([1, 2, 3, 4])
     _, child = tree.match_prefix([1, 2, 3, 4, 5, 6, 7, 8])
     tree.inc_lock_ref(child)
@@ -106,7 +134,7 @@ def test_evict_insufficient():
     bm = xstar_cpp.BlockManager(10, block_size, 512, xstar_cpp.Device.CUDA)
     tree = xstar_cpp.RadixTree(block_size)
     block_table = bm.alloc(1)
-    tree.insert([1, 2, 3, 4], block_table)
+    tree.insert([1, 2, 3, 4], block_table, bm)
     freed = tree.evict(10, bm)
 
     assert freed == 1 and tree.lru_size() == 0
@@ -120,8 +148,8 @@ def test_evict_cascade_empty_parent():
     tree = xstar_cpp.RadixTree(block_size)
     block_table = bm.alloc(2)
     block_table2 = bm.alloc(1)
-    tree.insert([1, 2, 3, 4, 5, 6, 7, 8], block_table)
-    tree.insert([1, 2, 3, 4, 9, 9, 9, 9], [block_table[0], block_table2[0]])
+    tree.insert([1, 2, 3, 4, 5, 6, 7, 8], block_table, bm)
+    tree.insert([1, 2, 3, 4, 9, 9, 9, 9], [block_table[0], block_table2[0]], bm)
     _, upper = tree.match_prefix([1, 2, 3, 4])
     _, child = tree.match_prefix([1, 2, 3, 4, 5, 6, 7, 8])
 
@@ -136,3 +164,32 @@ def test_evict_cascade_empty_parent():
     assert freed == 1
 
     assert tree.lru_size() == 0
+
+
+# insert 时, 加入 leaf, parent 如果在 lru_list 移除
+def test_insert_lru_invariant():
+    bs = 16
+    bm = xstar_cpp.BlockManager(8, bs, 256, xstar_cpp.Device.CUDA, 1)
+    tree = xstar_cpp.RadixTree(bs)
+
+    # 2 块的 seqA (32 tokens)
+    seqA = list(range(32))
+    blocksA = bm.alloc(2)
+    tree.insert(seqA, blocksA, bm)
+    # print(f"after insert A: lru={tree.lru_size()} evictable={tree.evictable_blocks()}")
+    assert tree.lru_size() == 1
+
+    # 延长序列 seqA+seqB (64 tokens, 4 块) -- 修复前: insert 停在 A 叶子下挂孩子, A 带孩子留在 LRU
+    blocksAB = blocksA + bm.alloc(2)
+    tree.insert(seqA + list(range(100, 132)), blocksAB, bm)
+    # print(f"after insert AB: lru={tree.lru_size()} evictable={tree.evictable_blocks()}")
+    assert tree.lru_size() == 1, f"LRU invariant broken: lru={tree.lru_size()}"
+
+    # 逐块驱逐 -- 修复前这里 SIGSEGV (孤儿 parent 悬空)
+    freed_total = 0
+    while tree.evictable_blocks() > 0:
+        freed_total += tree.evict(6, bm)
+    # print(
+    #     f"evicted all: freed={freed_total} lru={tree.lru_size()} evictable={tree.evictable_blocks()}"
+    # )
+    assert tree.lru_size() == 0 and tree.evictable_blocks() == 0

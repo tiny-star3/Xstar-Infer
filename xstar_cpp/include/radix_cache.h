@@ -76,12 +76,12 @@ private:
 
 /**
  * Radix prefix-cache tree. Cached prefix -> fork blocks (bm.fork, no prefill recompute); residual re-prefilled.
- * Drives BlockManager only via bm.fork (reuse) and bm.free (evict). block_size must == bm.block_size().
- * CONTRACT: insert() records an ALREADY-allocated block_table (caller alloc'd + prefilled); tree does not alloc.
+ * Drives BlockManager via bm.fork (reuse), bm.ref (insert), and bm.free (evict). block_size must == bm.block_size().
+ * CONTRACT: insert() records an ALREADY-allocated block_table (caller alloc'd + prefilled) and takes ONE ref on the blocks it newly records; tree never allocs.
  *           Caller passes BLOCK-ALIGNED tokens + block_table: tokens truncated to floor(len/block_size)*block_size, block_table covers only those whole blocks.
  *           The residual < block_size (tokens + its blocks) is kept by the caller (request-level), NEVER enters the tree.
  *           If tokens fully match an existing node, returns it WITHOUT overwriting block_table; caller must not re-insert an already-cached prefix (insert is for new prefixes only).
- *           match_prefix returns a BLOCK-ALIGNED length; caller forks block_table[:matched/BS], re-prefills the rest.
+ *           match_prefix returns a BLOCK-ALIGNED length; caller forks returned blocks directly, re-prefills the rest; matched length = len(blocks)*BS.
  *           evict() frees via bm.free + cascades empty parents; returns < need_blocks if LRU empties -> caller falls back to Recompute.
  */
 class RadixTree
@@ -91,20 +91,24 @@ public:
     ~RadixTree();
 
     /**
-     * Walk tree matching tokens.
-     * Input is TRUNCATED to a block-aligned length (residual < block_size does NOT participate).
-     * Returns (block-aligned matched_length, node where match ended).
-     * Refreshes LRU order: the matched leaf (if on LRUList) is moved to tail (most-recently-used).
-     * Caller forks block_table[:matched/BS], re-prefills the residual.
+     * Match tokens against the tree; input truncated to a block-aligned length (residual < block_size does NOT participate).
+     * Returns (blocks of the matched prefix, node where match ended).
+     *   blocks: physical block ids in position order (root segment first), the WHOLE matched chain -- caller forks this list directly.
+     *           Matched length is derivable: len(blocks) * block_size().
+     *           Terminal node may be partially matched (floored to block boundary).
+     *   node:   pin anchor only (inc/dec walk up from here) -- NOT a block source. Root when no match.
+     * Refreshes LRU order for visited nodes. Caller: fork(blocks) -> adopt_prefix(forked); skip all when blocks empty.
      */
-    std::pair<int, RadixNode *> match_prefix(const std::vector<int> &tokens);
+    std::pair<std::vector<int>, RadixNode *> match_prefix(const std::vector<int> &tokens);
 
     /**
-     * Insert a block-aligned token segment + its already-allocated block_table (residual < block_size was kept by caller, NOT passed).
-     * Splits existing whole-block node on partial overlap. New leaf enters LRUList at tail (evictable, lock_ref=0); caller inc_lock_ref to pin.
-     * Returns the leaf (or the existing node on full match, without overwriting).
+     * Insert a block-aligned token segment + its already-allocated block_table (residual kept by caller; NOT passed).
+     * Takes a ref (bm.ref) on every block it newly records -- tree owns 1 ref per held block; so each recorded block's ref_cnt == 1 (alloc) + N (forked) + 1 (tree).
+     * Caller's finish-side bm.free drops its own share.
+     * Full-match re-cache returns the existing node WITHOUT adding refs or overwriting block_table.
+     * New leaf enters LRUList at tail (lock_ref=0); caller inc_lock_ref to pin. Returns the leaf (or existing node on full match).
      */
-    RadixNode *insert(const std::vector<int> &tokens, const std::vector<int> &block_table);
+    RadixNode *insert(const std::vector<int> &tokens, const std::vector<int> &block_table, BlockManager &bm);
 
     /**
      * Pin node + all ancestors (walk UP parent chain).

@@ -83,19 +83,13 @@ public:
     void reset();
 
     /**
-     * Radix path: install forked prefix blocks + start at matched_len.
-     * Pre:
-     *   fresh cache (cursor_==0, block_table_ empty, d_block_table_==nullptr); throws otherwise.
-     *   prefix_blocks non-empty (empty prefix = no residual, rejected).
-     *   matched_len == prefix_blocks.size() * block_size (whole blocks only).
-     *   matched_len < max_seq_len (else nothing left to extend).
-     * Post:
-     *   cursor_ = matched_len, block_table_ = prefix_blocks, d_block_table_ alloc'd + h2d.
-     *   adopted_ = true.  Following prefill writes residual [cursor, cursor+seq).
-     *   depth scoped: recursive delete of prefix subtree, caller must drop its own ref (bm.free) -- tree holds its own.
-     *   ownership: cache takes over the bm.fork ref; freed via bm.free(block_table()) at finish/preempt.
+     * Radix path: install forked prefix blocks; cursor = prefix_blocks.size() * block_size (derived).
+     * Pre: fresh cache (else throws); prefix_blocks non-empty (caller skips empty match).
+     *      derived cursor < max_seq_len (else throws).
+     * Post: block_table_ = prefix_blocks, d_block_table_ h2d, adopted_ = true; next prefill writes residual.
+     * Ownership: cache takes over the bm.fork ref; freed via bm.free(block_table()) at finish/preempt.
      */
-    void adopt_prefix(const std::vector<int> &prefix_blocks, std::int64_t matched_len);
+    void adopt_prefix(const std::vector<int> &prefix_blocks);
 
 private:
     std::int64_t num_kv_heads_;
