@@ -3,8 +3,12 @@
 #include "ops/paged_attention.h"
 #include "cuda/cuda_allocator.h"
 
-constexpr int SPLIT_KV_THRESHOLD = 512;
-constexpr int SPLIT_KV_NUM_SPLITS = 8;
+// split-KV decode policy, from bench_splitkv (batch 1/4 x ctx 512..32000): no gain <=2048 (~1.0x noise), clear gain >=8192; S=16 beats S=8 at 8192 AND 32000 (cap=16 is the MEASURED ceiling, S=32 untested).
+// Threshold 4096 sits in the flat-then-rise crossover (over-threshold cheaper than under).
+// One split per ~512 K tokens = 8 Bc tiles; smaller chunk loses to launch/alloc overhead on short seqs.
+constexpr int SPLIT_KV_THRESHOLD = 4096;
+constexpr int SPLIT_KV_CHUNK = 512;
+constexpr int SPLIT_KV_MAX_SPLITS = 16;
 
 Tensor paged_attention(const BlockManager &bm, int layer, const Tensor &Q, const int *d_block_table, std::int64_t seq_k, int num_heads, int num_kv_heads, bool is_decode)
 {
@@ -29,7 +33,7 @@ Tensor paged_attention(const BlockManager &bm, int layer, const Tensor &Q, const
         throw std::runtime_error("unsupported device");
 }
 
-Tensor paged_attention(const BlockManager &bm, int layer, const Tensor &Q, const int *d_block_table_2d, const int *cu_seqlens_q, const int *cu_seqlens_k, int num_seqs, int max_blocks_per_seq, int max_seqlen_q, int max_seqlen_k, int num_heads, int num_kv_heads, bool is_decode)
+Tensor paged_attention(const BlockManager &bm, int layer, const Tensor &Q, const int *d_block_table_2d, const int *cu_seqlens_q, const int *cu_seqlens_k, int num_seqs, int max_blocks_per_seq, int max_seqlen_q, int max_seqlen_k, int num_heads, int num_kv_heads, bool is_decode, int num_splits)
 {
     std::int64_t head_dim = Q.shape().back();
 
@@ -44,17 +48,20 @@ Tensor paged_attention(const BlockManager &bm, int layer, const Tensor &Q, const
 
         if (is_decode)
         {
-            if (max_seqlen_k > SPLIT_KV_THRESHOLD)
+            int ns = num_splits > 0 ? num_splits
+                                    : (max_seqlen_k > SPLIT_KV_THRESHOLD
+                                           ? std::min(SPLIT_KV_MAX_SPLITS, std::max(2, max_seqlen_k / SPLIT_KV_CHUNK))
+                                           : 1);
+            if (ns > 1)
             {
-                int num_splits = SPLIT_KV_NUM_SPLITS;
-                float *mid_o = (float *)cuda_alloc(num_splits * num_seqs * num_heads * head_dim * sizeof(float));
-                float *mid_lse = (float *)cuda_alloc(num_splits * num_seqs * num_heads * sizeof(float));
+                float *mid_o = (float *)cuda_alloc(ns * num_seqs * num_heads * head_dim * sizeof(float));
+                float *mid_lse = (float *)cuda_alloc(ns * num_seqs * num_heads * sizeof(float));
                 paged_attention_decode_split_launch(mid_o, mid_lse, Q.data(), bm.pool_ptr(),
-                                                    d_block_table_2d, cu_seqlens_k, num_seqs, max_blocks_per_seq, num_splits,
+                                                    d_block_table_2d, cu_seqlens_k, num_seqs, max_blocks_per_seq, ns,
                                                     bm.layer_stride() / dz, bm.block_bytes() / dz, layer,
                                                     num_heads, num_kv_heads, head_dim, bm.block_size(), Q.dtype());
                 paged_attention_decode_split_reduce_launch(result.data(), mid_o, mid_lse,
-                                                           num_seqs, num_splits, num_heads, head_dim, Q.dtype());
+                                                           num_seqs, ns, num_heads, head_dim, Q.dtype());
                 cuda_free(mid_o);
                 cuda_free(mid_lse);
             }

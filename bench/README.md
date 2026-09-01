@@ -115,3 +115,61 @@ python -m bench.bench_ttft
 **诚实边界**:bit-exact 是在贪心确定路径下成立。严格说 re-prefill 走 varlen 路径、原路径走
 增量 decode,两条路在 bf16 下理论上存在 8-ulp 量级差异;bit-exact 是因为误差未翻转 argmax,
 不是数值路径完全等价。验证完 pool 改回 `* 8`。
+
+## bench_radix:前缀缓存(RadixAttention)效率
+
+两个 workload,照 vLLM `benchmark_prefix_caching.py` 与 SGLang `hicache/bench_multiturn.py` 的工业口径:
+**同一 workload 下 `use_radix` 开/关各跑一遍做 A/B**,不是手工拼 hit/miss 两批。开关在
+`serve/app.py:58`(`Scheduler(use_radix=...)`);off 半场服务端 `NoRadixTree` 桩自动退化(radix-off == 无缓存)。
+
+### bench_radix_repeat:共享 system prompt
+
+同一长 prompt 连发 `REPEAT=32` 次(1411 token):第 1 个冷(全量 prefill,完成后路径种进 radix 树),
+后 31 个热(命中,只 prefill 被 scheduler 留作 query 的 1 token)。取 warm 段 batch 中位数对 cold 得 speedup。
+
+**结果**(2026-09-01,6GB 卡,0.5B,`MAX_TOKENS=1` 时端到端 ≈ TTFT):
+
+| 口径 | 耗时 |
+|------|------|
+| cold(radix-off 基线 = 每次全量 prefill) | 3.49s |
+| warm(命中,只 prefill 1 token)         | 1.19s |
+| speedup                               | **3.1x** |
+
+**判读**:radix 省的是 prefill 计算,TTFT 是锐利指标。cold 含 ~120ms 固定开销平台,SHARED 越长
+(全量 prefill 越贵) speedup 越接近真实上限;warm 被 120ms 平台主导,是下界。
+
+### bench_radix_multiturn:多轮对话逐轮复用
+
+N client × R 轮,每轮 prompt = 自己历史 + 新增段,生成文本回灌,逐轮测 TTFT 中位数。
+on/off 两半同参数对齐(8 client、BASE=221 token、`MAX_TOKENS=16`)。
+
+**结果**(2026-09-01,对齐后):
+
+| 轮 | radix ON | radix OFF | off/on |
+|----|----------|-----------|--------|
+| 1  | 5.94s    | 5.88s     | ~1.0x  |
+| 2  | 6.07s    | 10.18s    | 1.68x  |
+| 3  | 6.36s    | 14.94s    | 2.35x  |
+| 4  | 6.74s    | 24.69s    | 3.66x  |
+| 5  | 6.87s    | 30.96s    | **4.51x** |
+
+**判读**:
+- round-1 两边同为 ~5.9s = 自校验(第 1 轮无论开关都是冷跑,harness 测的是同一件事)
+- on 只缓升到 1.16x(decode 每轮读更长的 KV,memory-bound 主导);off 暴涨到 5.27x(每轮重 prefill 全历史)
+- 第 5 轮 off/on = **4.51x**,比 repeat 的 3.1x 更猛——因为累积了 5 轮历史,这才是 radix 的真实量级
+
+### 复现协议
+
+```bash
+# radix ON(默认)
+.venv/bin/python -m uvicorn serve.app:app --host 127.0.0.1 --port 8000
+.venv/bin/python -m bench.bench_radix_repeat
+.venv/bin/python -m bench.bench_radix_multiturn
+
+# radix OFF:改 app.py:58 = False → 重启 → 跑同样的 bench_radix_multiturn → 改回 True 再重启
+```
+
+**坑(必读)**:off 半场必须干净重启 + `kill -9` 清掉旧 client。后台 bench 被 SIGTERM 杀会留孤儿请求
+挂在 scheduler.running、占着 block;pool 耗尽 → scheduler `_loop` 死于 OOM 后 re-raise → **loop 已死
+但 HTTP 仍 listen**,后续请求全部挂起(phase3 债务"orphan abort 关闭不干净",也是三种进程死里最隐蔽的)。
+

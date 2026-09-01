@@ -166,6 +166,10 @@ Tensor qwen2_forward(const Qwen2ModelWeights &w,
  * positions: NOT an arg -- forward builds it from cu_seqlens_q_host + kv_caches[i]->cursor(): prefill=seg-local arange concat; decode=per-seq [cursor-1].
  *   This matches vLLM CommonAttentionMetadata (positions is built at the runner layer, attention just consumes it).
  *
+ * num_splits: decode-only tuning knob threaded to every block's paged_attention UNMODIFIED.
+ *   >0 forces the split count (1 = non-split baseline, k>1 = k-way split); <=0 (default -1) = auto policy
+ *   (threshold -> chunk -> cap; see paged_attention.h for the contract). Prefill ignores it.
+ *
  * bm: shared global pool (num_layers == cfg.num_hidden_layers, asserted); kv_caches: one PagedKVCache per seq.
  *
  * CONTRACT: prefill ONCE on fresh caches, then decode N times. positions length == cu_seqlens_q_host.back().
@@ -181,7 +185,7 @@ Tensor qwen2_forward(const Qwen2ModelWeights &w,
                      std::vector<PagedKVCache *> &kv_caches,
                      bool is_decode,
                      const std::int64_t *input_ids,
-                     const std::vector<std::int64_t> &cu_seqlens_q_host);
+                     const std::vector<std::int64_t> &cu_seqlens_q_host, int num_splits);
 
 /**
  * Load Qwen2.5 weights from a safetensors mmap into a Qwen2ModelWeights.

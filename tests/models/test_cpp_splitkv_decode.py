@@ -120,6 +120,7 @@ def test_qwen2_forward_multi_matches_single_splitkv_decode():
         True,
         next_ids.numpy(),
         [0, 1, 2, 3, 4],
+        num_splits=8,
     )
     multi_decode = cpp_to_torch(
         xstar_cpp.to_cpu(multi_decode_cuda), [len(next_ids), cfg.vocab_size]

@@ -356,7 +356,7 @@ Tensor qwen2_forward_paged_py(Qwen2ModelWeights &w, Qwen2Config &cfg, Tensor &ro
                          input_ids.data(), seq_len, positions_ptr, mask_ptr);
 }
 
-Tensor qwen2_forward_multi_py(Qwen2ModelWeights &w, Qwen2Config &cfg, Tensor &rope_cache, BlockManager &bm, py::list kv_caches_py, bool is_decode, py::array_t<std::int64_t, py::array::c_style> input_ids, py::array_t<std::int64_t, py::array::c_style> cu_seqlens_q_host_py)
+Tensor qwen2_forward_multi_py(Qwen2ModelWeights &w, Qwen2Config &cfg, Tensor &rope_cache, BlockManager &bm, py::list kv_caches_py, bool is_decode, py::array_t<std::int64_t, py::array::c_style> input_ids, py::array_t<std::int64_t, py::array::c_style> cu_seqlens_q_host_py, int num_splits)
 {
     // forward 自己 build positions
     int num_seqs = kv_caches_py.size();
@@ -383,7 +383,7 @@ Tensor qwen2_forward_multi_py(Qwen2ModelWeights &w, Qwen2Config &cfg, Tensor &ro
         cu_seqlens_q_host[i] = cu_seqlens_q_host_py.at(i);
     }
 
-    return qwen2_forward(w, cfg, rope_cache, bm, kv_caches, is_decode, input_ids.data(), cu_seqlens_q_host);
+    return qwen2_forward(w, cfg, rope_cache, bm, kv_caches, is_decode, input_ids.data(), cu_seqlens_q_host, num_splits);
 }
 
 PYBIND11_MODULE(xstar_cpp, m)
@@ -546,5 +546,5 @@ PYBIND11_MODULE(xstar_cpp, m)
     m.def("attention_fa2", &attention_fa2_py, py::arg("Q"), py::arg("K"), py::arg("V"), py::arg("mask"));
     m.def("qwen2_forward_incremental", &qwen2_forward_incremental_py, py::arg("w"), py::arg("cfg"), py::arg("rope_cache"), py::arg("kv_cache"), py::arg("is_decode"), py::arg("input_ids"), py::arg("mask") = py::none());
     m.def("qwen2_forward_paged", &qwen2_forward_paged_py, py::arg("w"), py::arg("cfg"), py::arg("rope_cache"), py::arg("bm"), py::arg("kv_cache"), py::arg("is_decode"), py::arg("input_ids"), py::arg("mask") = py::none());
-    m.def("qwen2_forward_multi", &qwen2_forward_multi_py, py::arg("w"), py::arg("cfg"), py::arg("rope_cache"), py::arg("bm"), py::arg("kv_caches"), py::arg("is_decode"), py::arg("input_ids"), py::arg("cu_seqlens_q_host"));
+    m.def("qwen2_forward_multi", &qwen2_forward_multi_py, py::arg("w"), py::arg("cfg"), py::arg("rope_cache"), py::arg("bm"), py::arg("kv_caches"), py::arg("is_decode"), py::arg("input_ids"), py::arg("cu_seqlens_q_host"), py::arg("num_splits") = -1);
 }

@@ -48,7 +48,11 @@ void paged_attention_launch(void *out, const void *Q,
  *   decode:  Q=[num_seqs, num_heads, hd] (1 Q token/seq);
  *            grid(ceil(num_seqs/NUM_WARPS), num_heads); NUM_WARPS seqs packed per block;
  *            per-seq seq_k from cu_seqlens_k; cu_seqlens_q UNUSED in decode.
- *            max_seqlen_k (host) = max per-seq seq_k: when it exceeds SPLIT_KV_THRESHOLD, decode routes to the split-KV two-stage kernel (per-split partial + LSE merge), else the single decode kernel. Unused in prefill.
+ *            max_seqlen_k (host) = max per-seq seq_k; drives the decode split decision (unused in prefill).
+ *            num_splits (decode; ignored in prefill): >0 FORCES the split count -- 1 = force non-split baseline, k>1 = force k-way split (bypasses auto).
+ *              <=0 (binding default -1) = auto policy: split if max_seqlen_k > SPLIT_KV_THRESHOLD, with S = min(SPLIT_KV_MAX_SPLITS, max(2, max_seqlen_k / SPLIT_KV_CHUNK)).
+ *              Auto-policy constants live in paged_attention.cpp (single source of truth; the header names them only).
+ *              On the split path, decode routes to the two-stage split-KV kernel (per-split partial + LSE merge); otherwise the single decode kernel.
  *   K/V read from pool via 2D block_table [num_seqs, max_blocks_per_seq] (logical block -> physical);
  *            K/V spans the full seq_k (including radix-forked prefix blocks), Q covers only the extend segment.
  *   caller contract: prefill takes TWO cu_seqlens (q = extend-segment cumsum, k = full-length cumsum);
@@ -66,7 +70,7 @@ Tensor paged_attention(const BlockManager &bm, int layer,
                        const int *cu_seqlens_k,     // [num_seqs+1], device; decode: cumsum(cursor)
                        int num_seqs, int max_blocks_per_seq, int max_seqlen_q, int max_seqlen_k,
                        int num_heads, int num_kv_heads,
-                       bool is_decode);
+                       bool is_decode, int num_splits);
 
 /**
  * CUDA launch (CUDA-free decl so .cpp links without CUDA header).
@@ -86,6 +90,18 @@ void paged_attention_prefill_launch(void *out, const void *Q, const void *pool,
                                     int num_heads, int num_kv_heads, int head_dim, int block_size,
                                     DType dtype);
 
+/**
+* Split-KV decode (FlashDecoding): stage1 per-split partial, stage2 LSE-weighted merge.
+* Decode attention has 1 Q/seq -- the only parallelism left is the K axis; splitting num_splits segments restores it. stage1 grid.z = num_splits.
+
+* stage1 partials (f32, intermediate):
+*   mid_o   [num_splits][num_seqs][num_heads][head_dim]
+*   mid_lse [num_splits][num_seqs][num_heads]     lse = m + log(l) = log(sum_j e^{s_j})
+*   O' = O/l (softmax-normalized); O' * e^{lse} = sum_j e^{s_j} v_j -- the invariant stage2 merges on.
+* Split boundary (per-seq, Bc-aligned): kv_len_per_split = ceil(ceil(seq_k/num_splits)/Bc)*Bc; split s covers [s*len, min((s+1)*len, seq_k)). Splits past seq_k write lse = -FLT_MAX; stage2 skips them.
+* stage2 (grid = (ceil(num_seqs/WARPS), num_heads)): running-max online merge over num_splits -- rescale each step by e^{old-n_max}, final normalize by e_sum (never e^{lse} directly: lse can overflow exp).
+* Both accumulate f32; bf16 only at the final out = acc/e_sum downcast.
+*/
 void paged_attention_decode_split_launch(float *mid_o, float *mid_lse,
                                          const void *Q, const void *pool,
                                          const int *d_block_table_2d, const int *cu_seqlens_k,

@@ -217,7 +217,7 @@ Tensor transformer_block(const Tensor &x,
                          std::vector<PagedKVCache *> &kv_caches,
                          bool is_decode, std::int64_t layer_idx,
                          const std::int64_t *positions,
-                         const std::vector<std::int64_t> &cu_seqlens_q_host)
+                         const std::vector<std::int64_t> &cu_seqlens_q_host, int num_splits)
 {
     if (x.shape().size() != 2)
         throw std::runtime_error("block rank mismatch");
@@ -342,7 +342,7 @@ Tensor transformer_block(const Tensor &x,
     }
 
     // 多请求 Paged_Attention 仅 CUDA(CPU 回退到四步复合 attention)
-    Tensor attn_out = paged_attention(bm, layer_idx, Q_head_split, d_block_table_2d, d_cu_seqlens_q, d_cu_seqlens_k, num_seqs, max_blocks, max_seqlen_q, max_seqlen_k, num_heads, num_key_value_heads, is_decode);
+    Tensor attn_out = paged_attention(bm, layer_idx, Q_head_split, d_block_table_2d, d_cu_seqlens_q, d_cu_seqlens_k, num_seqs, max_blocks, max_seqlen_q, max_seqlen_k, num_heads, num_key_value_heads, is_decode, num_splits);
 
     cuda_free(d_block_table_2d);
     cuda_free(d_cu_seqlens_k);

@@ -85,7 +85,7 @@ Tensor qwen2_forward(const Qwen2ModelWeights &w,
                      std::vector<PagedKVCache *> &kv_caches,
                      bool is_decode,
                      const std::int64_t *input_ids,
-                     const std::vector<std::int64_t> &cu_seqlens_q_host)
+                     const std::vector<std::int64_t> &cu_seqlens_q_host, int num_splits)
 {
     if (bm.num_layers() != cfg.num_hidden_layers)
         throw std::runtime_error("bm.num_layers() != cfg.num_hidden_layers");
@@ -120,7 +120,7 @@ Tensor qwen2_forward(const Qwen2ModelWeights &w,
     Tensor x = embedding(w.embed_tokens_w, input_ids, std::vector<std::int64_t>{sum_q});
     for (size_t i = 0; i < cfg.num_hidden_layers; i++)
     {
-        x = transformer_block(x, cfg.num_attention_heads, w.layers[i].ln1_w, w.layers[i].ln2_w, static_cast<float>(cfg.rms_norm_eps), w.layers[i].q_w, &w.layers[i].q_b, w.layers[i].k_w, &w.layers[i].k_b, w.layers[i].v_w, &w.layers[i].v_b, w.layers[i].o_w, w.layers[i].gate_up_w, w.layers[i].down_w, rope_cache, bm, kv_caches, is_decode, static_cast<std::int64_t>(i), positions.get(), cu_seqlens_q_host);
+        x = transformer_block(x, cfg.num_attention_heads, w.layers[i].ln1_w, w.layers[i].ln2_w, static_cast<float>(cfg.rms_norm_eps), w.layers[i].q_w, &w.layers[i].q_b, w.layers[i].k_w, &w.layers[i].k_b, w.layers[i].v_w, &w.layers[i].v_b, w.layers[i].o_w, w.layers[i].gate_up_w, w.layers[i].down_w, rope_cache, bm, kv_caches, is_decode, static_cast<std::int64_t>(i), positions.get(), cu_seqlens_q_host, num_splits);
     }
     x = rmsnorm(x, w.ln_final_w, static_cast<float>(cfg.rms_norm_eps));
     Tensor logits = linear(x, w.lm_head_w, nullptr);

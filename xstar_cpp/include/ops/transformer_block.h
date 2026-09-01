@@ -132,6 +132,7 @@ Tensor transformer_block(const Tensor &x,
  * This layer gathers block_tables into a 2D device buffer (padded with 0, unread past seq_k -- matches vLLM) + builds cu_seqlens_k (device, [0]+cumsum of post-write cursors).
  * Per-seq K/V slice = non-owning view (byte offset into the varlen-concat K/V tensor), passed to write.
  * Device buffers (d_bt2d, d_cu_k, d_cu_q) are temporary per-call (freed after kernel sync).
+ * num_splits: passed through UNMODIFIED to paged_attention (decode only; prefill ignores it). The block makes no split-policy decision -- threshold/chunk/cap live in paged_attention (single source of truth).
  */
 Tensor transformer_block(const Tensor &x,
                          std::int64_t num_heads,
@@ -146,4 +147,4 @@ Tensor transformer_block(const Tensor &x,
                          std::vector<PagedKVCache *> &kv_caches,
                          bool is_decode, std::int64_t layer_idx,
                          const std::int64_t *positions,
-                         const std::vector<std::int64_t> &cu_seqlens_q_host);
+                         const std::vector<std::int64_t> &cu_seqlens_q_host, int num_splits);
