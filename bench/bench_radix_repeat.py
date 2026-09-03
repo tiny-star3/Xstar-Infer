@@ -1,7 +1,3 @@
-# 重复 prompt 模式(vLLM benchmark_prefix_caching 的 fixed 模式):
-# 同一个长 prompt 连发 REPEAT 次, 第一个冷 prefill(树空, 全量, 完成后把路径种进 radix 树),
-# 之后每个命中 radix, 只 prefill 被 scheduler 留作 query 的 1 个 token。
-# 指标: cold_ttft(= use_radix=False 基线: 无 radix 时每次都是冷 prefill) vs warm_ttft_median。
 import asyncio
 import time
 import httpx
@@ -15,7 +11,9 @@ SHARED = (
     * 30
 )
 REPEAT = 32  # 连发次数: 第 1 个冷, 后 31 个热
-MAX_TOKENS = 1  # max_tokens=1 时端到端耗时 ≈ TTFT, 只隔离 prefill(radix 省的正是 prefill)
+MAX_TOKENS = (
+    1  # max_tokens=1 时端到端耗时 ≈ TTFT, 只隔离 prefill(radix 省的正是 prefill)
+)
 RUNS = 3  # warm 段取 RUNS 个 batch 的中位数, 抗抖动
 
 
@@ -26,6 +24,9 @@ async def timed_stream_one(client, prompt):
 
 
 async def main():
+    # 重复 prompt 模式(vLLM benchmark_prefix_caching 的 fixed 模式):
+    # 同一个长 prompt 连发 REPEAT 次, 第一个冷 prefill(树空, 全量, 完成后把路径种进 radix 树), 之后每个命中 radix, 只 prefill 被 scheduler 留作 query 的 1 个 token
+    # 指标: cold_ttft(= use_radix=False 基线: 无 radix 时每次都是冷 prefill) vs warm_ttft_median
     tok = AutoTokenizer.from_pretrained(os.path.expanduser("~/models/Qwen2.5-0.5B"))
     ptok = len(tok(SHARED)["input_ids"])
     timeout = httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0)

@@ -11,6 +11,7 @@ from xstar.layers.rope import RoPE
 import json
 from serve.scheduler import Scheduler, Request
 from serve.worker import Worker
+import asyncio
 
 sys.path.insert(0, "xstar_cpp_py")
 import xstar_cpp
@@ -98,12 +99,17 @@ async def stream(req):
 
     scheduler.submit(request)
 
-    # 消费 queue
-    while True:
-        token = await request.token_queue.get()
-        if token is None:
-            break
-        yield sse(tokenizer.decode(token))
+    try:
+        # 消费 queue
+        while True:
+            token = await request.token_queue.get()
+            if token is None:
+                break
+            yield sse(tokenizer.decode(token))
+    except asyncio.CancelledError:
+        # 登记
+        scheduler.abort(request)
+        raise
 
     # 测试
     # print(

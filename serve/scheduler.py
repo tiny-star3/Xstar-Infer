@@ -82,6 +82,17 @@ class Scheduler:
         )
         self.decode_ratio = decode_ratio  # decode 预留比例
         self.decode_cap = decode_cap  # 单个请求的预留最多 token 数
+        self._aborted = set()
+        # 连续失败次数
+        # 两种失败，处置不同
+        # 偶发失败（某一批请求碰上 OOM）：救完人继续跑是对的——服务还有别的请求要处理，为一批坏请求把整个调度器弄死，等于全服务陪葬
+        # 持续性失败（权重坏了、GPU 掉了）：每轮 tick 必崩，救人→继续→再崩无限循环——这种硬撑没意义，应该让它死得响亮（re-raise 出去，让进程层面看到）
+        self.fail_streak = 0
+
+    def abort(self, req):
+        # 把 id 塞 _aborted_requests 队列，下一轮 loop 迭代才 drain 做真正的 free
+        self._aborted.add(req)
+        self._wake.set()
 
     def submit(self, req):
         # req 塞 waiting + 唤醒循环
@@ -93,6 +104,33 @@ class Scheduler:
         # asyncio.create_task(self._loop())
         self._task = asyncio.create_task(self._loop())
 
+    def _free_kv(self, req):
+        # 释放请求 kv cache
+        if req.radix_tree_node:
+            self.radix_tree.dec_lock_ref(req.radix_tree_node)
+            req.radix_tree_node = None
+        if req.kv:
+            self.worker.bm.free(req.kv.block_table())
+            req.kv.reset()
+
+    def _release(self, req):
+        # 释放请求
+        self._free_kv(req)
+        if req in self.waiting:
+            self.waiting.remove(req)
+        if req in self.running:
+            self.running.remove(req)
+        req.state = State.FINISHED
+
+    def _fail_all_inflight(self):
+        # _loop 崩溃（比如 OOM）时，把所有在途请求（running + waiting 里的每一个 req）善后掉
+        # 通知客户端, 释放资源, 摘出队列
+        # asyncio 的技巧：queue 里可以放异常对象，stream() 的 await queue.get() 会把它在 await 点抛出来，客户端立刻收到错误而不是挂死
+        e = RuntimeError("scheduler crashed")
+        for req in list(self.running) + list(self.waiting):
+            req.token_queue.put_nowait(e)
+            self._release(req)
+
     async def _loop(self):
         # 死循环:都空 → await self._wake; 否则 → await self._tick()
         while True:
@@ -101,7 +139,11 @@ class Scheduler:
                     await self._wake.wait()
                     self._wake.clear()
                 else:
-                    await self._tick()
+                    # 这轮有没有真正 await/做事
+                    # 异常会跳过 return，直接进 _loop 的 except
+                    if not await self._tick():
+                        await self._wake.wait()
+                        self._wake.clear()
             except Exception:
                 import traceback
 
@@ -110,9 +152,20 @@ class Scheduler:
                 print(
                     "[scheduler] _loop crashed, printing above; re-raising", flush=True
                 )
-                raise
+                # except 块里先救人再决定死不死
+                self._fail_all_inflight()
+                self.fail_streak += 1
+                if self.fail_streak >= 5:
+                    raise
 
     async def _tick(self):
+        # 判断 _tick 有没有做事
+        made_progress = bool(self._aborted)
+        # 清理断连的客户端请求
+        for req in list(self._aborted):
+            self._release(req)
+        self._aborted.clear()
+
         prefills = []
         budget = self.worker.bm.num_free()
         while self.waiting:
@@ -193,20 +246,18 @@ class Scheduler:
         if prefills:
             # waiting 非空且显存和可驱逐的块够新请求 → prefills = ...
             await self.worker.run_batch(prefills, is_decode=False)
+            made_progress = True
         elif self.running:
             # 否则, decodes = list(running)
             decodes = []
             while self.worker.bm.num_free() < len(self.running):
                 victim = self.running.pop()
-                self.worker.bm.free(victim.kv.block_table())
-                if victim.radix_tree_node:
-                    self.radix_tree.dec_lock_ref(victim.radix_tree_node)
-                    victim.radix_tree_node = None
-                victim.kv.reset()
+                self._free_kv(victim)
                 victim.state = State.WAITING
                 self.waiting.appendleft(victim)
             decodes = list(self.running)
             await self.worker.run_batch(decodes, is_decode=True)
+            made_progress = True
 
         for req in list(self.running):
             if req.state == State.FINISHED:
@@ -218,5 +269,12 @@ class Scheduler:
                 self.worker.bm.free(req.kv.block_table())
                 if req.radix_tree_node:
                     self.radix_tree.dec_lock_ref(req.radix_tree_node)
+                    req.radix_tree_node = None
                 req.kv.reset()
                 self.running.remove(req)
+                made_progress = True
+
+        # 能执行到这 = 本轮干净，说明服务还活着，计数重新开始
+        self.fail_streak = 0
+
+        return made_progress
