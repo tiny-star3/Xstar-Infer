@@ -48,8 +48,8 @@ Xstar-Infer/
 ├── tests/                      # 一 op 一文件(bridge / harness / infra / ops / models / serve)
 ├── bench/                      # 吞吐 / TTFT / radix / splitKV 脚本
 │   └── bench_vllm/      # vLLM 调参 sweep
-├── deploy/                     # (计划) vLLM 启动脚本 + 调参记录
-├── docs/                       # 每 M 阶段 takeaway + 模拟面试
+├── deploy/                     # vLLM 启动脚本 + 调参记录
+├── docs/                       # 每 M 阶段 takeaway
 └── CMakeLists.txt
 ```
 
